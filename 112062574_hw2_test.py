@@ -80,16 +80,21 @@ class Agent(object):
     def __init__(self):
         self.action_space = gym.spaces.Discrete(12)
         self.q = QNetwork(self.action_space.n)
-        self.q.load_state_dict(torch.load('./112062574_hw2_data'))
+        self.q.load_state_dict(torch.load('./112062574_hw2_data', map_location=torch.device('cpu')))
         print("INFO: Model loaded successfully.")
         
 
     def act(self, observation):
-        observation = torch.Tensor(observation.copy())
-        observation = observation.permute(2, 0, 1).unsqueeze(0)
+        observation = self._preprocess(observation)
+        observation = torch.Tensor(observation.copy()).unsqueeze(0)
         with torch.no_grad():
             return self.q(observation).argmax().item()
         
+    def _preprocess(self, state):
+        state = np.dot(state[...,:3], [0.299, 0.587, 0.114])
+        state = state.astype(np.float32) / 255.0
+        state = np.reshape(state, (1, 240, 256)) 
+        return state       
 
 
 if __name__ == "__main__":
@@ -107,7 +112,7 @@ if __name__ == "__main__":
         while not done:
             action = agent.act(state)
             state, reward, done, info = env.step(action)
-            # env.render()
+            env.render()
             score += reward
 
     print("INFO: Score: ", score)
