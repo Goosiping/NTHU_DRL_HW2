@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
+import cv2
 
 import gym
 from nes_py.wrappers import JoypadSpace
@@ -82,13 +83,22 @@ class Agent(object):
         self.q = QNetwork(self.action_space.n)
         self.q.load_state_dict(torch.load('./112062574_hw2_data', map_location=torch.device('cpu')))
         print("INFO: Model loaded successfully.")
-        
+
+        self.frame_id = 0
+        self.frame_skip = 4
 
     def act(self, observation):
-        observation = self._preprocess(observation)
-        observation = torch.Tensor(observation.copy()).unsqueeze(0)
-        with torch.no_grad():
-            return self.q(observation).argmax().item()
+        if self.frame_id % self.frame_skip == 0:
+            observation = self._preprocess(observation)
+            observation = torch.Tensor(observation.copy()).unsqueeze(0)
+            with torch.no_grad():
+                action = self.q(observation).argmax().item()
+                self.last_action = action
+                self.frame_id += 1
+                return action
+        else:
+            self.frame_id += 1
+            return self.last_action
         
     def _preprocess(self, state):
         state = np.dot(state[...,:3], [0.299, 0.587, 0.114])
@@ -111,8 +121,10 @@ if __name__ == "__main__":
         done = False
         while not done:
             action = agent.act(state)
+
+            
             state, reward, done, info = env.step(action)
-            env.render()
+            # env.render()
             score += reward
 
     print("INFO: Score: ", score)
