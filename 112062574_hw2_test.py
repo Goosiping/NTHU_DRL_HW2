@@ -8,6 +8,8 @@ from nes_py.wrappers import JoypadSpace
 import gym_super_mario_bros
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 
+SHAPE = (1, 84, 84)
+
 '''
 class QNetwork(nn.Module):
     """
@@ -42,7 +44,7 @@ class QNetwork(nn.Module):
         out = self.fc(conv_out)
         return out
 '''
-
+'''
 class QNetwork(nn.Module):
     """
     For Gray Scale Image
@@ -59,6 +61,40 @@ class QNetwork(nn.Module):
         )
 
         conv_out_size = self._get_conv_out((1, 240, 256))
+
+        self.fc = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(conv_out_size, 512),
+            nn.ReLU(),
+            nn.Linear(512, n_actions),
+        )  
+
+    def _get_conv_out(self, shape):
+        o = self.conv(torch.zeros(1, *shape))
+        return int(np.prod(o.size()))
+
+    def forward(self, x):
+        conv_out = self.conv(x)
+        out = self.fc(conv_out)
+        return out
+'''    
+class QNetwork(nn.Module):
+    def __init__(self, n_actions):
+        super(QNetwork, self).__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(SHAPE[0], 32, kernel_size=8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 128, kernel_size=3, stride=1),
+            nn.ReLU(),
+            nn.Conv2d(128, 64, kernel_size=3, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 32, kernel_size=3, stride=2),
+            nn.ReLU(),
+        )
+
+        conv_out_size = self._get_conv_out(SHAPE)
 
         self.fc = nn.Sequential(
             nn.Flatten(),
@@ -101,10 +137,11 @@ class Agent(object):
             return self.last_action
         
     def _preprocess(self, state):
-        state = np.dot(state[...,:3], [0.299, 0.587, 0.114])
+        state = cv2.cvtColor(state, cv2.COLOR_RGB2GRAY)
+        state = cv2.resize(state, (SHAPE[1], SHAPE[2]), interpolation=cv2.INTER_AREA)
         state = state.astype(np.float32) / 255.0
-        state = np.reshape(state, (1, 240, 256)) 
-        return state       
+        state = np.reshape(state, SHAPE)
+        return state   
 
 
 if __name__ == "__main__":
@@ -124,7 +161,7 @@ if __name__ == "__main__":
 
             
             state, reward, done, info = env.step(action)
-            # env.render()
+            env.render()
             score += reward
 
     print("INFO: Score: ", score)

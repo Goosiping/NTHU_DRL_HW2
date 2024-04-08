@@ -4,32 +4,46 @@ import numpy as np
 import torch.optim as optim
 import torch.nn.functional as F
 import time
+import cv2 as cv
+import random
+from collections import deque
 
 import gym
 from nes_py.wrappers import JoypadSpace
 import gym_super_mario_bros
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 
+TARGET_SHAPE = (1, 84, 84)
+
 class QNetwork(nn.Module):
     def __init__(self, n_actions):
         super(QNetwork, self).__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=8, stride=4),
+            nn.Conv2d(TARGET_SHAPE[0], 32, kernel_size=8, stride=4),
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.Conv2d(32, 64, kernel_size=4, stride=1),
             nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),
+            nn.Conv2d(64, 128, kernel_size=3, stride=1),
+            nn.ReLU(),
+            nn.Conv2d(128, 64, kernel_size=3, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(64, 32, kernel_size=3, stride=2),
             nn.ReLU(),
         )
 
-        conv_out_size = self._get_conv_out((1, 240, 256))
+        conv_out_size = self._get_conv_out(TARGET_SHAPE)
 
         self.fc = nn.Sequential(
             nn.Flatten(),
             nn.Linear(conv_out_size, 512),
             nn.ReLU(),
             nn.Linear(512, n_actions),
-        )  
+        )
+
+        for i in range(0,8,2):
+            self.conv[i].weight.data.normal_(0, 0.1)
+        self.fc[1].weight.data.normal_(0, 0.1)
+        self.fc[3].weight.data.normal_(0, 0.1)
 
     def _get_conv_out(self, shape):
         o = self.conv(torch.zeros(1, *shape))
@@ -71,7 +85,7 @@ class DQN():
         self.qnet_target.eval()
         self.optimizer = optim.Adam(self.qnet_eval.parameters(), lr=self.lr)
 
-    def choose_action(self, state, epsilon=0):
+    def choose_action(self, state, epsilon = 0):
         input_state = torch.FloatTensor(state.copy()).unsqueeze(0).to(self.device)
         actions_value = self.qnet_eval.forward(input_state)
         if np.random.uniform() > epsilon:   # greedy
@@ -81,7 +95,7 @@ class DQN():
         return action
 
     def learn(self):
-        # TODO(Lab-5): DQN core algorithm.
+
         if self.learn_step_counter % self.replace_target_iter == 0 :
             self.qnet_target.load_state_dict(self.qnet_eval.state_dict())
 
@@ -147,7 +161,8 @@ class MarioWrapper(gym.Wrapper):
         self.observation_space = gym.spaces.Box(low=0.0, high=1.0, shape=image_shape, dtype=np.float32)
 
     def _preprocess(self, state):
-        state = np.dot(state[...,:3], [0.299, 0.587, 0.114])
+        state = cv.cvtColor(state, cv.COLOR_RGB2GRAY)
+        state = cv.resize(state, (self.image_shape[1], self.image_shape[2]), interpolation=cv.INTER_AREA)
         state = state.astype(np.float32) / 255.0
         state = np.reshape(state, self.image_shape)
         return state
@@ -168,12 +183,12 @@ if __name__ == "__main__":
     # Environment
     env_origin = gym_super_mario_bros.make('SuperMarioBros-v0')
     env_origin = JoypadSpace(env_origin, COMPLEX_MOVEMENT)
-    env = MarioWrapper(env_origin, (1, 240, 256))
+    env = MarioWrapper(env_origin, TARGET_SHAPE)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     agent = DQN(
                 n_actions = gym.spaces.Discrete(12).n,
-                input_shape = (1, 240, 256),
+                input_shape = TARGET_SHAPE,
                 qnet = QNetwork,
                 device = device,
                 learning_rate = 2e-4, 
@@ -184,6 +199,7 @@ if __name__ == "__main__":
     )
 
     episodes = 200
+    sample_episodes = 5
     total_step = 0
     start_time = time.time()
     print("INFO: Start training")
@@ -191,34 +207,67 @@ if __name__ == "__main__":
 
         # Reset environment.
         state = env.reset()
+        state, reward, done, info = env.step(0)
 
         # Initialize information.
         step = 0
         total_reward = 0
+        my_total_reward = 0
         loss = 0
+        frame_id = 0
 
-        # One episode.
+        # Environment info
+        MARIO ={"small": 0, "tall": 1, "fireball": 2}
+        prev_creatures = info["life"]
+        prev_mario = info["status"]
+        x_pos = deque(maxlen = 8)
+        x_pos.append(info["x_pos"])
         while True:
-            # TODO(Lab-6): Select action.
+            
+            # Training Data Collection
             epsilon = epsilon_compute(total_step)
-            action = agent.choose_action(state, epsilon)
+            if episode < sample_episodes:
+                if random.random() < epsilon:
+                    action = agent.choose_action(state)
+                else:
+                    action = int(np.random.choice([4, 3, 0, 9], 1, p = [0.7, 0.1, 0.1, 0.1]))
+            else:
+                action = agent.choose_action(state, epsilon)
 
             # Get next stacked state.
             state_next, reward, done, info = env.step(action)
 
-            # TODO(Lab-7): Train RL model.
-            agent.store_transition(state, action, reward, state_next, done)
-            if total_step > 4*agent.batch_size :
+            # Reward Engineering
+            my_reward = reward
+            # 1. Kill Creatures
+            if info["life"] < prev_creatures: 
+                my_reward += 3
+            # 2. Mario status
+            if MARIO[info["status"]] > MARIO[prev_mario]:
+                my_reward += 5
+            # 3. X position
+            x_pos.append(info["x_pos"])
+            if len(set(x_pos)) < 3:
+                my_reward -= 0.1
+
+            prev_creatures = info["life"]
+            prev_mario = info["status"]
+
+            if episode < sample_episodes or frame_id % 4 == 0:
+                agent.store_transition(state, action, my_reward, state_next, done)
+            if total_step > 4 * agent.batch_size :
                 loss = agent.learn()
 
             state = state_next.copy()
+            frame_id += 1
             step += 1
             total_step += 1
             total_reward += reward
+            my_total_reward += my_reward
 
             if total_step % 100 == 0 or done:
-                print('\rEpisode: {:3d} | Step: {:3d} / {:3d} | Reward: {:.3f} / {:.3f} | Loss: {:.3f} | Epsilon: {:.3f} | Time:{:.3f}'\
-                    .format(episode, step, total_step, reward, total_reward, loss, epsilon, time.time() - start_time), end="")
+                print('\rEpisode: {:3d} | Step: {:3d} / {:3d} | Reward: {:.3f} / {:.3f} | My_reward: {:.3f} / {:.3f} | Loss: {:.3f} | Epsilon: {:.3f} | Time:{:.3f}'\
+                    .format(episode, step, total_step, reward, total_reward, my_reward, my_total_reward, loss, epsilon, time.time() - start_time), end="")
             
             if total_step % 10000 == 0:
                 agent.save_model()
