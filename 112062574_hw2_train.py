@@ -13,7 +13,8 @@ from nes_py.wrappers import JoypadSpace
 import gym_super_mario_bros
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 
-TARGET_SHAPE = (1, 84, 84)
+TARGET_SHAPE = (4, 84, 84)
+STACK_FRAME = 4
 
 class QNetwork(nn.Module):
     def __init__(self, n_actions):
@@ -63,7 +64,7 @@ class DQN():
         learning_rate = 2e-4,
         reward_decay = 0.99,
         replace_target_iter = 1000,
-        memory_size = 10000,
+        memory_size = 30000,
         batch_size = 64
         ):
 
@@ -83,7 +84,7 @@ class DQN():
         self.qnet_eval = qnet(self.n_actions).to(self.device)
         self.qnet_target = qnet(self.n_actions).to(self.device)
         self.qnet_target.eval()
-        self.optimizer = optim.Adam(self.qnet_eval.parameters(), lr=self.lr)
+        self.optimizer = optim.RMSprop(self.qnet_eval.parameters(), lr=self.lr)
 
     def choose_action(self, state, epsilon = 0):
         input_state = torch.FloatTensor(state.copy()).unsqueeze(0).to(self.device)
@@ -157,6 +158,7 @@ def epsilon_compute(frame_id, epsilon_max=1, epsilon_min=0.05, epsilon_decay=100
 class MarioWrapper(gym.Wrapper):
     def __init__(self, env, image_shape):
         super().__init__(env)
+        self.k = STACK_FRAME
         self.image_shape = image_shape
         self.observation_space = gym.spaces.Box(low=0.0, high=1.0, shape=image_shape, dtype=np.float32)
 
@@ -164,17 +166,28 @@ class MarioWrapper(gym.Wrapper):
         state = cv.cvtColor(state, cv.COLOR_RGB2GRAY)
         state = cv.resize(state, (self.image_shape[1], self.image_shape[2]), interpolation=cv.INTER_AREA)
         state = state.astype(np.float32) / 255.0
-        state = np.reshape(state, self.image_shape)
         return state
     
     def step(self, action):
-        state, reward, done, info = self.env.step(action)
-        state = self._preprocess(state)
-        return state, reward, done, info
+        state_next = []
+        reward = 0
+        done = False
+        for i in range(self.k) :
+            if not done :
+                state_next_f, reward_f, done_f, info_f = self.env.step(action)
+                state_next_f = self._preprocess(state_next_f)
+                reward += reward_f
+                done = done_f
+                info = info_f
+            state_next.append(state_next_f[np.newaxis, ...])
+        state_next = np.concatenate(state_next, 0)
+        
+        return state_next, reward, done, info
     
     def reset(self):
         state = self.env.reset()
         state = self._preprocess(state)
+        state = state[np.newaxis, ...].repeat(self.k, axis=0)
         return state
 
 
@@ -183,7 +196,7 @@ if __name__ == "__main__":
     # Environment
     env_origin = gym_super_mario_bros.make('SuperMarioBros-v0')
     env_origin = JoypadSpace(env_origin, COMPLEX_MOVEMENT)
-    env = MarioWrapper(env_origin, TARGET_SHAPE)
+    env = MarioWrapper(env_origin, (1, 84, 84))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     agent = DQN(
@@ -194,12 +207,12 @@ if __name__ == "__main__":
                 learning_rate = 2e-4, 
                 reward_decay = 0.99,
                 replace_target_iter = 1000, 
-                memory_size = 10000,
+                memory_size = 30000,
                 batch_size = 64,
     )
 
-    episodes = 200
-    sample_episodes = 5
+    episodes = 500
+    sample_episodes = 2
     total_step = 0
     start_time = time.time()
     print("INFO: Start training")
@@ -247,14 +260,14 @@ if __name__ == "__main__":
                 my_reward += 5
             # 3. X position
             x_pos.append(info["x_pos"])
-            if len(set(x_pos)) < 3:
+            if len(set(x_pos)) < 2:
                 my_reward -= 0.1
 
             prev_creatures = info["life"]
             prev_mario = info["status"]
 
-            if episode < sample_episodes or frame_id % 4 == 0:
-                agent.store_transition(state, action, my_reward, state_next, done)
+            agent.store_transition(state, action, my_reward, state_next, done)
+
             if total_step > 4 * agent.batch_size :
                 loss = agent.learn()
 
